@@ -1,3 +1,169 @@
+# System Diagram & README — Photo Tagging & Similarity Pipeline
+
+> Mirrors the provided codebase (ImageAnalyzer, ResultStorageParquet, FaceComparer, CentralityGraphGenerator, services, and main())
+
+---
+
+## High‑Level Block Diagram (text)
+
+```
+[Input Folder]
+   │  (images)
+   ▼
+[ImageAnalyzer.process_images_parallel]
+   ├─▶ (Pool) workers → process_single_image(img)
+   │      ├─ OllamaService.describe_image → description
+   │      ├─ OllamaService.get_text_embedding → text embedding (ℝ^4096)
+   │      ├─ EXIFService.extract_exif_data → dimensions + EXIF JSON
+   │      ├─ DeepFaceService.get_face_embeddings → per-face vectors
+   │      ├─ Build result record → write_result() → results_parquet_<ts>/*.parquet
+   │      └─ checkpoint_<ts>.json.update(processed_files)
+   ▼
+[ResultStorageParquet.merge_results]
+   └─▶ image_results_<ts>.parquet (all images)
+
+[ImageAnalyzer.compare_all_images]
+   ├─ Load image_results_<ts>.parquet (batched)
+   ├─ compare_descriptions_textsim(batch_df)
+   │      ├─ SimilarityService.compute_text_similarity_matrix (BERTScore/SBERT)
+   │      ├─ FaceComparer.collect_face_embeddings_cuda (from parquet)
+   │      ├─ FaceComparer.compute_face_bonus_cuda → bonus_mat + match_ids
+   │      ├─ S_final = clamp(S_text + bonus_mat)
+   │      ├─ threshold pairs ≥ text_thresh
+   │      └─ write_similarities() → sim_parquet_<ts>/*.parquet
+   └─ merge_similarities() → similarities_<ts>.parquet
+
+[CentralityGraphGenerator.create_graph]
+   ├─ Load similarities_<ts>.parquet (≥ threshold)
+   ├─ Build NetworkX graph (nodes=images, edges=similarity)
+   ├─ Compute centralities: degree / closeness / harmonic / eigenvector / PageRank / betweenness
+   ├─ Enrich nodes with metadata from image_results_<ts>.parquet
+   ├─ Save metrics → centrality_metrics_<ts>.json
+   ├─ Visualize → centrality_graph_<ts>.png
+   └─ Export graph JSON → graph_<ts>.json
+
+[Outputs]
+  • image_results_<ts>.parquet              • similarities_<ts>.parquet
+  • centrality_metrics_<ts>.json           • centrality_graph_<ts>.png
+  • graph_<ts>.json (node_link)            • app_<ts>.log, checkpoint_<ts>.json
+```
+
+---
+
+## Detailed Flow (numbered)
+
+1. **Parallel ingestion** (`process_images_parallel`)
+
+   * Spawns a `multiprocessing.Pool`. Each worker calls `process_single_image` for a file.
+
+2. **Per‑image processing** (`process_single_image`)
+
+   * **Description**: `OllamaService.describe_image(path)` → rich caption.
+   * **Text embedding**: `OllamaService.get_text_embedding(text)` → 4,096‑D vector → serialized as JSON.
+   * **File stats**: `os.stat` (size/ctime/mtime).
+   * **EXIF**: `EXIFService.extract_exif_data` → `(width×height, EXIF JSON)`.
+   * **Faces**: `DeepFaceService.get_face_embeddings` (ArcFace + RetinaFace) → list of dicts with per‑face embedding; arrays converted to lists for parquet.
+   * **Record**: assemble dict and `write_result()` to `results_parquet_<ts>/*.parquet`.
+   * **Checkpoint**: append `image_path` to `checkpoint_<ts>.json` (`processed_files`).
+
+3. **Merge image results** (`merge_results`)
+
+   * Concatenate all per‑image parquet files → `image_results_<ts>.parquet` (also normalizes `dimensions`).
+
+4. **Text + Face similarity (batched)** (`compare_all_images` → `compare_descriptions_textsim`)
+
+   * **Text sim**: build similarity matrix from captions using BERTScore‑F1 (default), or Precision/Recall, or SBERT cosine.
+   * **Face bonus (CUDA)**: gather all per‑face vectors across batch; L2‑normalize; compute face–face cosine; keep pairs above `face_thresh` (default 0.460); count matches per image‑pair; convert counts → bonus matrix with `base_bonus`/`max_bonus`.
+   * **Combine**: `S_final = clamp(S_text + bonus_mat, max=1.0)`.
+   * **Threshold**: collect image pairs with `S_final ≥ text_thresh` (default 0.90).
+   * **Persist**: `write_similarities()` per batch → `sim_parquet_<ts>/*.parquet`; then `merge_similarities()` → `similarities_<ts>.parquet`.
+   * **Optional write‑back**: when faces exist, attempt to attach `match_id` per face back into `image_results_<ts>.parquet`.
+     *Note*: safest to align rows by `image_path` rather than `iloc` index.
+
+5. **Graph construction & analytics** (`CentralityGraphGenerator.create_graph`)
+
+   * Load `similarities_<ts>.parquet` and keep edges ≥ graph threshold (e.g., 0.80).
+   * Build NetworkX graph; compute **degree, closeness, harmonic, eigenvector, PageRank, betweenness**.
+   * Enrich nodes with metadata (description, EXIF, counts, centralities, etc.).
+   * Save `centrality_metrics_<ts>.json`; render `centrality_graph_<ts>.png`; export `graph_<ts>.json`.
+
+6. **Infra**
+
+   * **GPU monitor**: lightweight NVML‑based tqdm bar (main process only).
+   * **Queue logging**: process‑safe logging via `QueueListener/QueueHandler` to `app_<ts>.log`.
+   * **Pickle hooks**: `__getstate__/__setstate__` drop non‑picklable fields (loggers/clients) before Pool pickling and reconstruct them in workers.
+   * **Checkpoint**: resume‑friendly JSON for processed files and compared pairs.
+
+---
+
+## Mermaid Flowchart
+
+```mermaid
+flowchart TD
+  A[Input Image Folder] --> B[process_images_parallel]
+  B --> C[process_single_image]
+  C --> C1[Describe via Ollama]
+  C --> C2[Embed text (4096D)]
+  C --> C3[EXIF + dimensions]
+  C --> C4[DeepFace face embeddings]
+  C --> C5[Write per-image parquet]
+  C5 --> D[merge_results]
+  D --> E[image_results_<ts>.parquet]
+
+  E --> F[compare_all_images]
+  F --> G[compare_descriptions_textsim]
+  G --> G1[Text similarity matrix]
+  G --> G2[Face bonus (CUDA)]
+  G2 --> G3[Optional match_id write-back]
+  G1 --> H[S_final = clamp(S_text + bonus)]
+  H --> I[Threshold >= text_thresh]
+  I --> J[write_similarities (batch)]
+  J --> K[merge_similarities]
+  K --> L[similarities_<ts>.parquet]
+
+  L --> M[CentralityGraphGenerator]
+  M --> M1[Build NX graph]
+  M --> M2[Compute centralities]
+  M --> M3[Enrich nodes]
+  M --> M4[Save metrics/PNG/JSON]
+```
+
+---
+
+## README — Concise Narrative
+
+### Overview
+
+This pipeline ingests a folder of photos, generates **textual descriptions** and **text embeddings**, extracts **EXIF/size** and **face embeddings**, computes **image–image similarity** by fusing **text similarity** with a **face‑based bonus**, and finally builds a **graph** of similar photos with centrality analytics and visualizations.
+
+### Key Steps
+
+1. **Parallel per‑image processing**: captioning (Ollama/LLaVA), 4,096‑D text embeddings, EXIF extraction, and DeepFace (ArcFace) face vectors — saved as parquet shards plus a resume checkpoint.
+2. **Merge**: consolidate per‑image shards into `image_results_<ts>.parquet`.
+3. **Batched similarity**: compute a text similarity matrix (BERTScore/SBERT), add a CUDA face‑bonus matrix based on cross‑image face matches, clamp, threshold, and store pairs in `similarities_<ts>.parquet`.
+4. **Graph analytics**: build a NetworkX graph over high‑similarity pairs, compute multiple centralities, enrich nodes, export JSON, and render a PNG visualization.
+
+### Outputs
+
+* `image_results_<ts>.parquet`: one row per image with description, embedding, EXIF, faces, etc.
+* `similarities_<ts>.parquet`: image pairs with fused scores and face match counts.
+* `centrality_metrics_<ts>.json`, `centrality_graph_<ts>.png`, `graph_<ts>.json`.
+* `checkpoint_<ts>.json`, `app_<ts>.log`.
+
+### Notes & Options
+
+* **Face IDs write‑back**: optional `match_id` per detected face is written back when available; align by `image_path` to avoid indexing drift.
+* **Thresholds**: `text_thresh` (default 0.90), `face_thresh` (default 0.460), `base_bonus/max_bonus` (0.1/0.3).
+* **Performance**: CUDA acceleration for face‑bonus and PyTorch ops; queue‑based logging; lightweight GPU utilization bar.
+
+### Future Enhancements
+
+* Quality‑aware face recognition (e.g., MagFace) and quality‑based weighting.
+* Child‑age gap calibration of thresholds.
+* Robust persistence of `match_id` by `image_path` join.
+
+
+
 # deepface
 
 <div align="center">
