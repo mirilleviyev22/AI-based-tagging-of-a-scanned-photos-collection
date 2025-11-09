@@ -96,7 +96,7 @@
 
 ---
 
-## README — Concise Narrative
+## README - Concise Narrative
 
 ### Overview
 
@@ -104,7 +104,7 @@ This pipeline ingests a folder of photos, generates **textual descriptions** and
 
 ### Key Steps
 
-1. **Parallel per‑image processing**: captioning (Ollama/LLaVA), 4,096‑D text embeddings, EXIF extraction, and DeepFace (ArcFace) face vectors — saved as parquet shards plus a resume checkpoint.
+1. **Parallel per‑image processing**: captioning (Ollama/LLaVA), 4,096‑D text embeddings, EXIF extraction, and DeepFace (ArcFace) face vectors - saved as parquet shards plus a resume checkpoint.
 2. **Merge**: consolidate per‑image shards into `image_results_<ts>.parquet`.
 3. **Batched similarity**: compute a text similarity matrix (BERTScore/SBERT), add a CUDA face‑bonus matrix based on cross‑image face matches, clamp, threshold, and store pairs in `similarities_<ts>.parquet`.
 4. **Graph analytics**: build a NetworkX graph over high‑similarity pairs, compute multiple centralities, enrich nodes, export JSON, and render a PNG visualization.
