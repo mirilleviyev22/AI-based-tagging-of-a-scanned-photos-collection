@@ -96,40 +96,6 @@
 
 ---
 
-## Mermaid Flowchart
-
-```mermaid
-flowchart TD
-  A[Input Image Folder] --> B[process_images_parallel]
-  B --> C[process_single_image]
-  C --> C1[Describe via Ollama]
-  C --> C2[Embed text (4096D)]
-  C --> C3[EXIF + dimensions]
-  C --> C4[DeepFace face embeddings]
-  C --> C5[Write per-image parquet]
-  C5 --> D[merge_results]
-  D --> E[image_results_<ts>.parquet]
-
-  E --> F[compare_all_images]
-  F --> G[compare_descriptions_textsim]
-  G --> G1[Text similarity matrix]
-  G --> G2[Face bonus (CUDA)]
-  G2 --> G3[Optional match_id write-back]
-  G1 --> H[S_final = clamp(S_text + bonus)]
-  H --> I[Threshold >= text_thresh]
-  I --> J[write_similarities (batch)]
-  J --> K[merge_similarities]
-  K --> L[similarities_<ts>.parquet]
-
-  L --> M[CentralityGraphGenerator]
-  M --> M1[Build NX graph]
-  M --> M2[Compute centralities]
-  M --> M3[Enrich nodes]
-  M --> M4[Save metrics/PNG/JSON]
-```
-
----
-
 ## README — Concise Narrative
 
 ### Overview
