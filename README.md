@@ -128,8 +128,6 @@ This pipeline ingests a folder of photos, generates **textual descriptions** and
 * Child‑age gap calibration of thresholds.
 * Robust persistence of `match_id` by `image_path` join.
 
-```
-
 ---
 
 # deepface
